@@ -1,0 +1,17 @@
+[Unit]
+Description=Service to monitor access to webcam over go2rtc
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/path/to/projects/videomon
+ExecStart=/path/to/projects/videomon/build/bin/videomon
+Restart=on-failure
+RestartSec=5s
+
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target

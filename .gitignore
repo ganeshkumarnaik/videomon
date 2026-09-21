@@ -1,0 +1,31 @@
+# CMake build output
+/build/
+/cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+compile_commands.json
+CTestTestfile.cmake
+Testing/
+
+# Generated binaries and object files
+*.o
+*.a
+*.so
+*.so.*
+/videomon
+
+# Runtime output
+*.log
+*.pid
+
+# Local secrets/config overrides
+/src/config.txt
+
+# Editor and operating-system files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
