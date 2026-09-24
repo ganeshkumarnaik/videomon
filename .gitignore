@@ -21,7 +21,7 @@ Testing/
 *.pid
 
 # Local secrets/config overrides
-/src/config.txt
+/src/config.toml
 
 # Editor and operating-system files
 .vscode/

@@ -8,6 +8,7 @@
 #include <csignal>
 #include <future>
 #include <curl/curl.h>
+#include <toml.hpp>
 
 /* Global variables */
 volatile std::sig_atomic_t checkConfigFile;
@@ -29,14 +30,15 @@ public:
         int check_interval_seconds = 1;
         std::string bot_token;
         std::string chat_id;
+        std::vector<std::string> monitored_devices;
     } cfg;
 
     /* Constructor */
     videoMon()
     {
         checkConfigFile = false;
-        configFilePath = std::filesystem::path("/path/to/projects/videomon/src") / "config.txt";
-        std::cout << "Constructor initialized\n";
+        configFilePath = VIDEOMON_CONFIG_PATH;
+        std::cout << "Config file is at path: " << configFilePath << std::endl;
     }
 
     std::string trim_white_spaces(const std::string& str)
@@ -51,42 +53,40 @@ public:
 
     bool parseConfigFile(std::filesystem::path& path, AppConfig& cfg)
     {
-        std::string line;
-
-        /* Open file */
-        std::ifstream f(path);
-        if(!f.is_open())
-            return false;
-
-        /* Iterate through all lines */
-        while(std::getline(f, line))
+        //Parse TOML
+        toml::table tbl;
+        std::string filePath = path.generic_string();
+        
+        try
         {
-            line = trim_white_spaces(line);
+            tbl = toml::parse_file(filePath);
+            
+            cfg.cooldown_seconds       = tbl["cooldown_seconds"].value_or(1);
+            cfg.check_interval_seconds = tbl["check_interval_seconds"].value_or(60);
+            cfg.bot_token              = tbl["telegram"]["bot_token"].value_or("");
+            cfg.chat_id                = tbl["telegram"]["chat_id"].value_or("");
 
-            if(line.empty() || line[0] == '#')
-                continue;
+            /* Iterate over the monitored_devices array */
+            if(auto* mon_dev = tbl["devices"]["monitor"].as_array())
+            {
+                cfg.monitored_devices.clear();
 
-            /* Splice the line at = sign */
-            auto spliceIndex = line.find('=');
-            if(spliceIndex == std::string::npos)
-                continue;
+                for(const auto& dev : *mon_dev)
+                {
+                    if(auto dev_entry = dev.value<std::string>())
+                    {
+                        cfg.monitored_devices.push_back(*dev_entry);
+                    }
+                }
+            }
 
-            std::string key = trim_white_spaces(line.substr(0, spliceIndex));
-            std::string value = trim_white_spaces(line.substr(spliceIndex+1, line.size()));
-
-            if(key == "cooldown_seconds")
-                cfg.cooldown_seconds = std::stoi(value);
-            else if(key == "check_interval_seconds")
-                cfg.check_interval_seconds = std::stoi(value);
-            else if(key == "bot_token")
-                cfg.bot_token = value;
-            else if(key == "chat_id")
-                cfg.chat_id = value;
+            return true;
         }
-
-        f.close();
-
-        return true;
+        catch (const toml::parse_error& err)
+        {
+            std::cerr << "Parsing failed; Sticking to default values\n" << err << "\n";
+            return false;
+        }
     }
 
     static size_t curl_handle_response(void* ptr, size_t size, size_t nmemb, void* userdata)
@@ -192,11 +192,16 @@ int main()
         std::this_thread::sleep_for(std::chrono::seconds(vidMon.cfg.check_interval_seconds));
         currentState = inactive;
 
+        if(vidMon.cfg.monitored_devices.empty())
+        {
+            continue;
+        }
+
         for(const auto& entry : std::filesystem::directory_iterator(path))
         {
             std::string subpath = entry.path();
 
-            //Check if subpath is a directory and if it doesnt start with a number, skip it
+            /* Check if subpath is a directory and if it doesnt start with a number, skip it */
             std::error_code ec;
             if(!std::filesystem::is_directory(subpath, ec) || 
             !std::filesystem::exists(subpath + "/fd", ec) ||
@@ -212,7 +217,7 @@ int main()
                 for(const auto& subentry : std::filesystem::directory_iterator(subpath + "/fd"))
                 {
                     if(std::filesystem::is_symlink(subentry.path()) && 
-                       std::filesystem::read_symlink(subentry.path()) == "/dev/video0")
+                       std::filesystem::read_symlink(subentry.path()) == vidMon.cfg.monitored_devices[0])
                     {
                         procName = vidMon.getProcessName(pid);
                         if(!procName.empty())
@@ -233,7 +238,7 @@ int main()
         {
             if(currentState == active)
             {
-                std::cout << "Process " << procName << " with PID " << pid << " has /dev/video0 open" << std::endl;
+                std::cout << "Process " << procName << " with PID " << pid << " has " << vidMon.cfg.monitored_devices[0] << " open" << std::endl;
                 std::string msg = "Camera active with process " + procName;
                 vidMon.trigger_async_telegram_alert(msg);
                 previousAlert = std::chrono::steady_clock::now();
