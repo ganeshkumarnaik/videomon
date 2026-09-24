@@ -16,6 +16,9 @@ find_package(CURL REQUIRED)
 # Add executable
 add_executable(videomon ${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp)
 
+target_compile_definitions(videomon
+    PRIVATE VIDEOMON_CONFIG_PATH="${CMAKE_CURRENT_SOURCE_DIR}/src/config.toml")
+
 #Include dirs
 target_include_directories(videomon PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
 

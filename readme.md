@@ -1,16 +1,16 @@
 # videomon
 
-`videomon` is a Linux utility that watches process file descriptors for `/dev/video0` and sends Telegram notifications when the webcam becomes active, when the stream ends, and periodically while the camera stays active.
+`videomon` is a Linux utility designed to detect when a configured camera device is accessed and notify the user through Telegram. It is intended for monitoring camera activity on a home server or unattended Linux environment where access to a video stream needs to be observed without manual checking.
 
 ## Current implementation details
 
-This project currently behaves as follows:
+The current implementation behaves as follows:
 
-- It scans `/proc` entries and inspects each process's `/proc/<pid>/fd` directory.
-- If a file descriptor is a symlink to `/dev/video0`, that process is treated as active.
-- It sends notifications through the Telegram Bot API using libcurl.
-- It reloads configuration on `SIGHUP`.
-- It watches only `/dev/video0`; there is no device selection configuration yet.
+- It reads `/proc` entries and examines each process's `/proc/<pid>/fd` directory.
+- It compares symlinks against the device paths defined in the TOML configuration.
+- It sends alerts through the Telegram Bot API using libcurl.
+- It reloads the configuration when it receives `SIGHUP`.
+- The configuration includes a `devices.monitor` list, but the active detection loop currently evaluates only the first item in that list.
 
 ## Requirements
 
@@ -19,12 +19,15 @@ This project currently behaves as follows:
 - C++17 compiler
 - libcurl development files
 - Telegram bot token and chat ID
+- TOML++ header file
 
 On Linux, install the build dependencies with:
 
 ```sh
 sudo apt install build-essential cmake libcurl4-openssl-dev
 ```
+
+The project also depends on the TOML++ header library. Download the upstream TOML++ release or single-header package and place it in the project include path, or adjust the include path in your build environment accordingly.
 
 ## Build
 
@@ -43,32 +46,35 @@ build/bin/videomon
 
 ## Configuration
 
-The application reads `config.txt` at startup. In the current code, placeholder is mentioned in `src/main.cpp` as:
+The application reads a TOML configuration file at startup. In the current build, the path is set with `VIDEOMON_CONFIG_PATH` and points to:
 
-```cpp
-/path/to/projects/videomon/src/config.txt
+```text
+src/config.toml
 ```
 
+A sample configuration file, config_example.toml, is included for reference.
 
-The file format is:
+Example configuration:
 
 ```ini
-cooldown_seconds=60
-check_interval_seconds=1
-bot_token=<YOUR_BOT_TOKEN>
-chat_id=<YOUR_CHAT_ID>
+cooldown_seconds = 60
+check_interval_seconds = 1
+
+[devices]
+monitor = ["/dev/video0"]
+
+[telegram]
+bot_token = "<YOUR_BOT_TOKEN>"
+chat_id = "<YOUR_CHAT_ID>"
 ```
 
 - `cooldown_seconds`: minimum interval between repeated "camera active" alerts.
-- `check_interval_seconds`: sleep interval between `/proc` scans.
+- `check_interval_seconds`: interval between `/proc` scans.
 - `bot_token`: Telegram bot token used by the Bot API.
-- `chat_id`: Telegram chat or user ID that receives alerts.
+- `chat_id`: Telegram chat or user ID that receives notifications.
+- `monitor`: device paths that the application watches.
 
-Keep the file private. Do not commit real credentials to version control. A typical setup is:
-
-```sh
-chmod 600 src/config.txt
-```
+Keep the file private. Do not commit real credentials to version control.
 
 ## Running
 
@@ -113,15 +119,15 @@ If your repo path differs, edit the `WorkingDirectory` and `ExecStart` values be
 
 ## Detection logic
 
-On each loop, the program does the following:
+On each loop iteration, the program performs the following actions:
 
 1. Iterates through `/proc` entries.
-2. Checks each process's `/fd` directory.
-3. Looks for symlinks whose target is exactly `/dev/video0`.
-4. Treats any matching process as an active camera stream.
+2. Inspects each process's `/fd` directory.
+3. Checks for symlinks that point to the first configured monitor path.
+4. Treats a matching process as an active camera stream.
 
 ## Notes
 
 - Telegram alerts are dispatched asynchronously.
-- The native implementation uses libcurl rather than the shell helper shown in older code paths.
-- The app is intentionally scoped to `/dev/video0` and does not yet support multiple camera devices or runtime device selection.
+- The application uses libcurl for Bot API requests.
+- At present, the detection loop checks only the first item in `devices.monitor`; additional entries are parsed but not used in the active scan.
