@@ -7,10 +7,11 @@
 The current implementation behaves as follows:
 
 - It reads `/proc` entries and examines each process's `/proc/<pid>/fd` directory.
-- It compares symlinks against the device paths defined in the TOML configuration.
+- It resolves configured device paths and process file-descriptor targets to canonical paths before comparing them.
+- It tracks whether the selected device is idle or active, and sends alerts on state changes and at the configured cooldown interval while active.
 - It sends alerts through the Telegram Bot API using libcurl.
-- It reloads the configuration when it receives `SIGHUP`.
-- The configuration includes a `devices.monitor` list, but the active detection loop currently evaluates only the first item in that list.
+- It sends one startup notification when the process launches. Receiving `SIGHUP` reloads the configuration.
+- The configuration includes a `devices.monitor` list, but the active detection loop currently scans only the first entry in the parsed `MonitoredDevices` list. Configured paths that cannot be resolved are skipped, so this may not be the first TOML entry.
 
 ## Requirements
 
@@ -52,7 +53,7 @@ The application reads a TOML configuration file at startup. In the current build
 src/config.toml
 ```
 
-A sample configuration file, config_example.toml, is included for reference.
+A sample configuration file, `src/config_example.toml`, is included.
 
 Example configuration:
 
@@ -123,11 +124,12 @@ On each loop iteration, the program performs the following actions:
 
 1. Iterates through `/proc` entries.
 2. Inspects each process's `/fd` directory.
-3. Checks for symlinks that point to the first configured monitor path.
-4. Treats a matching process as an active camera stream.
+3. Resolves each file-descriptor target and compares it with the canonical path of the first successfully resolved configured device.
+4. Treats a matching process as an active camera stream and records its process name and PID.
+5. Sends a notification when the device becomes active or idle. While active, it sends another alert whenever `cooldown_seconds` elapses.
 
 ## Notes
 
 - Telegram alerts are dispatched asynchronously.
 - The application uses libcurl for Bot API requests.
-- At present, the detection loop checks only the first item in `devices.monitor`; additional entries are parsed but not used in the active scan.
+- Additional valid entries in `devices.monitor` are parsed but are not scanned by the current detection loop.

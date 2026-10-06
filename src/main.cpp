@@ -9,6 +9,7 @@
 #include <future>
 #include <curl/curl.h>
 #include <toml.hpp>
+#include <utility>
 
 /* Global variables */
 volatile std::sig_atomic_t checkConfigFile;
@@ -25,12 +26,69 @@ public:
     std::filesystem::path configFilePath;
     std::future<void> telegramFuture; //removes warning. keeps async op alive. new alert waits
 
+    enum class DeviceStatus{
+        IDLE,
+        ACTIVE
+    };
+
+    struct MonitoredDevices{
+        std::filesystem::path configured_path;
+        std::filesystem::path canonical_path;
+        bool resolution_status = false;
+
+        DeviceStatus current_device_status{DeviceStatus::IDLE};
+        DeviceStatus previous_device_status{DeviceStatus::IDLE};
+        int current_pid = -1;
+        std::string current_process_name;
+
+        std::chrono::steady_clock::time_point previous_alert = std::chrono::steady_clock::time_point::min();
+
+        std::string updateState(int cooldown_seconds)
+        {
+            std::string msg;
+            if(current_device_status != previous_device_status)
+            {
+                if(current_device_status == DeviceStatus::ACTIVE)
+                {
+                    std::cout << "Process " << current_process_name << " with PID " << current_pid << " has " << canonical_path << " open" << std::endl;
+                    msg = "Camera active with process " + current_process_name;
+                    previous_alert = std::chrono::steady_clock::now();
+                }
+                else
+                {
+                    std::cout << "Stream ended." << std::endl;
+                    msg = "Camera stream ended";
+                    previous_alert = std::chrono::steady_clock::time_point::min();
+                }
+                previous_device_status = current_device_status;
+            }
+            else
+            {
+                if(current_device_status == DeviceStatus::ACTIVE)
+                {
+                    auto now = std::chrono::steady_clock::now();
+                    if(now - previous_alert >= std::chrono::seconds(cooldown_seconds))
+                    {
+                        msg = "Camera active with process " + current_process_name;
+                        previous_alert = now;
+                    }
+                }
+                else
+                {
+                    previous_alert = std::chrono::steady_clock::time_point::min();
+                }
+            }
+            return msg;
+        }
+
+    };
+
     struct AppConfig{
-        int cooldown_seconds = 60;
-        int check_interval_seconds = 1;
+        int cooldown_seconds;
+        int check_interval_seconds;
         std::string bot_token;
         std::string chat_id;
-        std::vector<std::string> monitored_devices;
+        std::vector<MonitoredDevices> monitored_devices{};
     } cfg;
 
     /* Constructor */
@@ -75,7 +133,23 @@ public:
                 {
                     if(auto dev_entry = dev.value<std::string>())
                     {
-                        cfg.monitored_devices.push_back(*dev_entry);
+                        /* Create MonitoredDevices objects */
+                        MonitoredDevices md;
+                        md.configured_path = *dev_entry;
+
+                        std::error_code ec;
+                        std::filesystem::path canonical_path = std::filesystem::canonical(*dev_entry, ec);
+                        if(ec)
+                        {
+                            /* Path is not valid */
+                            continue;
+                        }
+                        else
+                        {
+                            md.canonical_path = canonical_path;
+                            md.resolution_status = true;
+                            cfg.monitored_devices.push_back(std::move(md));
+                        }
                     }
                 }
             }
@@ -96,13 +170,13 @@ public:
         return size * nmemb;
     }
 
-    void send_telegram_alert_native(const std::string& msg)
+    void send_telegram_alert_native(const std::string& msg, const std::string& bot_token, const std::string& chat_id)
     {
         CURL *curl = curl_easy_init();
         if(!curl)
             return;
 
-        if(!cfg.bot_token.empty() && !cfg.chat_id.empty())
+        if(!bot_token.empty() && !chat_id.empty())
         {
             /* Structure the URL */
             char* encoded_msg = curl_easy_escape(curl, msg.c_str(), msg.length()); //encodes spaces and such
@@ -111,7 +185,7 @@ public:
                 curl_easy_cleanup(curl);
                 return;
             }
-            std::string url = "https://api.telegram.org/bot" + cfg.bot_token + "/sendMessage?chat_id=" + cfg.chat_id + "&text=" + encoded_msg;
+            std::string url = "https://api.telegram.org/bot" + bot_token + "/sendMessage?chat_id=" + chat_id + "&text=" + encoded_msg;
             curl_free(encoded_msg);
 
             /* Configure options */
@@ -130,9 +204,12 @@ public:
 
     void trigger_async_telegram_alert(std::string msg)
     {
-        telegramFuture = std::async(std::launch::async, [this, msg]()
+        /* Kepp a copy of cfg to avoid racing with config file reload triggered by SIGHUP */
+        std::string bot_token = cfg.bot_token;
+        std::string chat_id   = cfg.chat_id;
+        telegramFuture = std::async(std::launch::async, [this, msg, bot_token, chat_id]()
         {
-            send_telegram_alert_native(msg);
+            send_telegram_alert_native(msg, bot_token, chat_id);
         });
     }
 
@@ -156,46 +233,14 @@ public:
     {
         std::cout << "PID : " << getpid() << std::endl;
     }
-};
 
-
-int main()
-{
-    const std::string path = "/proc/";
-    const std::string inactive = "INACTIVE";
-    const std::string active = "ACTIVE";
-    std::string currentState = inactive;
-    std::string previousState = inactive;
-    int pid;
-    std::string procName;
-    auto previousAlert = std::chrono::steady_clock::time_point::min();
-
-    /* Instantiate */
-    videoMon vidMon;
-    vidMon.printPid();
-    vidMon.parseConfigFile(vidMon.configFilePath, vidMon.cfg);
-    vidMon.trigger_async_telegram_alert("Starting Videomon service with PID " + std::to_string(getpid()));
-
-    //Register signal handler
-    signal(SIGHUP, sigHandler);
-    
-    while(true)
+    void scan(MonitoredDevices& device)
     {
-        if(checkConfigFile)
-        {
-            vidMon.parseConfigFile(vidMon.configFilePath, vidMon.cfg);
-            checkConfigFile = false;
-            std::cout << "cooldown_seconds = " << vidMon.cfg.cooldown_seconds << std::endl;
-            std::cout << "check_interval_seconds = " << vidMon.cfg.check_interval_seconds << std::endl;
-        }
-
-        std::this_thread::sleep_for(std::chrono::seconds(vidMon.cfg.check_interval_seconds));
-        currentState = inactive;
-
-        if(vidMon.cfg.monitored_devices.empty())
-        {
-            continue;
-        }
+        const std::string path = "/proc/";
+        std::string procName;
+        device.current_device_status = DeviceStatus::IDLE;
+        device.current_pid = -1;
+        device.current_process_name.clear();
 
         for(const auto& entry : std::filesystem::directory_iterator(path))
         {
@@ -212,62 +257,86 @@ int main()
 
             try
             {
-                pid = std::stoi(subpath.substr(6,subpath.size()-1));
-
                 for(const auto& subentry : std::filesystem::directory_iterator(subpath + "/fd"))
                 {
-                    if(std::filesystem::is_symlink(subentry.path()) && 
-                       std::filesystem::read_symlink(subentry.path()) == vidMon.cfg.monitored_devices[0])
+                    std::error_code ec;
+                    std::filesystem::path canonical_path = std::filesystem::canonical(subentry.path(), ec);
+                    if(ec)
                     {
-                        procName = vidMon.getProcessName(pid);
-                        if(!procName.empty())
+                        continue;
+                    }
+                    else
+                    {
+                        if(canonical_path == device.canonical_path)
                         {
-                            currentState = active;
-                            break;
+                            device.current_device_status = DeviceStatus::ACTIVE;
+                            device.current_pid = std::stoi(subpath.substr(6,subpath.size()-1));
+                            procName = getProcessName(device.current_pid);
+                            if(!procName.empty())
+                            {
+                                device.current_process_name = procName;
+                            }
+                            return; // Stop once a process with open device found
                         }
                     }
                 }
-
             }
             catch(const std::exception& e)
             {
                 continue; //skip this subpath if conversion fails
             }
         }
-        if(currentState != previousState)
+    }
+
+
+};
+
+
+int main()
+{
+    /* Instantiate */
+    videoMon vidMon;
+    vidMon.printPid();
+    vidMon.parseConfigFile(vidMon.configFilePath, vidMon.cfg);
+    vidMon.trigger_async_telegram_alert("Starting Videomon service with PID " + std::to_string(getpid()));
+
+    //Register signal handler
+    signal(SIGHUP, sigHandler);
+    
+    while(true)
+    {
+        if(checkConfigFile)
         {
-            if(currentState == active)
+            bool retVal = vidMon.parseConfigFile(vidMon.configFilePath, vidMon.cfg);
+            if(retVal)
             {
-                std::cout << "Process " << procName << " with PID " << pid << " has " << vidMon.cfg.monitored_devices[0] << " open" << std::endl;
-                std::string msg = "Camera active with process " + procName;
-                vidMon.trigger_async_telegram_alert(msg);
-                previousAlert = std::chrono::steady_clock::now();
+                checkConfigFile = false;
+                std::cout << "cooldown_seconds = " << vidMon.cfg.cooldown_seconds << std::endl;
+                std::cout << "check_interval_seconds = " << vidMon.cfg.check_interval_seconds << std::endl;
             }
             else
             {
-                std::cout << "Stream ended." << std::endl;
-                std::string msg = "Camera stream ended";
-                vidMon.trigger_async_telegram_alert(msg);
-                previousAlert = std::chrono::steady_clock::time_point::min();
+                /* Fallback to default values, read config again next loop */
+                vidMon.cfg.cooldown_seconds = 60;
+                vidMon.cfg.check_interval_seconds = 1;
             }
-            previousState = currentState;
         }
-        else
+
+        std::this_thread::sleep_for(std::chrono::seconds(vidMon.cfg.check_interval_seconds));
+
+        if(vidMon.cfg.monitored_devices.empty())
         {
-            if(currentState == active)
-            {
-                auto now = std::chrono::steady_clock::now();
-                if(now - previousAlert >= std::chrono::seconds(vidMon.cfg.cooldown_seconds))
-                {
-                    std::string msg = "Camera active with process " + procName;
-                    vidMon.trigger_async_telegram_alert(msg);
-                    previousAlert = now;
-                }
-            }
-            else
-            {
-                previousAlert = std::chrono::steady_clock::time_point::min();
-            }
+            continue;
+        }
+
+        auto& device = vidMon.cfg.monitored_devices[0];
+
+        vidMon.scan(device);
+
+        std::string alert = device.updateState(vidMon.cfg.cooldown_seconds);
+        if(!alert.empty())
+        {
+            vidMon.trigger_async_telegram_alert(alert);
         }
     }
     return 0;
