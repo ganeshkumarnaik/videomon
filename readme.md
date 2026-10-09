@@ -7,11 +7,12 @@
 The current implementation behaves as follows:
 
 - It reads `/proc` entries and examines each process's `/proc/<pid>/fd` directory.
-- It resolves configured device paths and process file-descriptor targets to canonical paths before comparing them.
-- It tracks whether the selected device is idle or active, and sends alerts on state changes and at the configured cooldown interval while active.
+- It resolves each configured device path and each process's file-descriptor target to canonical paths before comparing them.
+- It tracks each monitored device independently, recording whether it is idle or active and which process currently owns the stream.
+- It sends alerts on per-device state changes and again at the configured cooldown interval while a device remains active.
 - It sends alerts through the Telegram Bot API using libcurl.
 - It sends one startup notification when the process launches. Receiving `SIGHUP` reloads the configuration.
-- The configuration includes a `devices.monitor` list, but the active detection loop currently scans only the first entry in the parsed `MonitoredDevices` list. Configured paths that cannot be resolved are skipped, so this may not be the first TOML entry.
+- Any configured device paths that cannot be resolved are skipped, while valid entries continue to be monitored.
 
 ## Requirements
 
@@ -53,7 +54,7 @@ The application reads a TOML configuration file at startup. In the current build
 src/config.toml
 ```
 
-A sample configuration file, `src/config_example.toml`, is included.
+A sample configuration file, `src/config_example.toml`, is included. To use it, copy it to `src/config.toml` or point `VIDEOMON_CONFIG_PATH` at another file.
 
 Example configuration:
 
@@ -62,18 +63,18 @@ cooldown_seconds = 60
 check_interval_seconds = 1
 
 [devices]
-monitor = ["/dev/video0"]
+monitor = ["/dev/video0", "/dev/video1", "/dev/video2"]
 
 [telegram]
 bot_token = "<YOUR_BOT_TOKEN>"
 chat_id = "<YOUR_CHAT_ID>"
 ```
 
-- `cooldown_seconds`: minimum interval between repeated "camera active" alerts.
+- `cooldown_seconds`: minimum interval between repeated "camera active" alerts for a given device.
 - `check_interval_seconds`: interval between `/proc` scans.
 - `bot_token`: Telegram bot token used by the Bot API.
 - `chat_id`: Telegram chat or user ID that receives notifications.
-- `monitor`: device paths that the application watches.
+- `monitor`: device paths that the application watches; each entry is tracked independently.
 
 Keep the file private. Do not commit real credentials to version control.
 
@@ -124,12 +125,12 @@ On each loop iteration, the program performs the following actions:
 
 1. Iterates through `/proc` entries.
 2. Inspects each process's `/fd` directory.
-3. Resolves each file-descriptor target and compares it with the canonical path of the first successfully resolved configured device.
-4. Treats a matching process as an active camera stream and records its process name and PID.
-5. Sends a notification when the device becomes active or idle. While active, it sends another alert whenever `cooldown_seconds` elapses.
+3. Resolves each file-descriptor target and compares it against the canonical paths for every valid configured device in `devices.monitor`.
+4. Treats a matching process as an active camera stream for that specific device and records its process name and PID.
+5. Sends a notification when the relevant device becomes active or idle. While active, it sends another alert whenever `cooldown_seconds` elapses.
 
 ## Notes
 
 - Telegram alerts are dispatched asynchronously.
 - The application uses libcurl for Bot API requests.
-- Additional valid entries in `devices.monitor` are parsed but are not scanned by the current detection loop.
+- Every device in `devices.monitor` is tracked independently, so the app can report activity across multiple cameras.

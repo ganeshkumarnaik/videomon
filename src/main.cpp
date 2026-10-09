@@ -50,14 +50,14 @@ public:
             {
                 if(current_device_status == DeviceStatus::ACTIVE)
                 {
-                    std::cout << "Process " << current_process_name << " with PID " << current_pid << " has " << canonical_path << " open" << std::endl;
-                    msg = "Camera active with process " + current_process_name;
+                    std::cout << "INFO: Process " << current_process_name << " with PID " << current_pid << " has " << canonical_path << " open" << std::endl;
+                    msg = "Camera active with " + current_process_name + " accessing " + canonical_path.string();
                     previous_alert = std::chrono::steady_clock::now();
                 }
                 else
                 {
-                    std::cout << "Stream ended." << std::endl;
-                    msg = "Camera stream ended";
+                    std::cout << "INFO: Stream ended for " << canonical_path << std::endl;
+                    msg = "Camera stream ended for " + canonical_path.string();
                     previous_alert = std::chrono::steady_clock::time_point::min();
                 }
                 previous_device_status = current_device_status;
@@ -96,7 +96,7 @@ public:
     {
         checkConfigFile = false;
         configFilePath = VIDEOMON_CONFIG_PATH;
-        std::cout << "Config file is at path: " << configFilePath << std::endl;
+        std::cout << "INFO: Config file is at path: " << configFilePath << std::endl;
     }
 
     std::string trim_white_spaces(const std::string& str)
@@ -158,7 +158,7 @@ public:
         }
         catch (const toml::parse_error& err)
         {
-            std::cerr << "Parsing failed; Sticking to default values\n" << err << "\n";
+            std::cerr << "ERROR: Parsing failed; Sticking to default values\n" << err << "\n";
             return false;
         }
     }
@@ -195,7 +195,7 @@ public:
 
             CURLcode res = curl_easy_perform(curl);
             if(res != CURLE_OK)
-                std::cerr << "Telegram request failed: " << curl_easy_strerror(res) << '\n';
+                std::cerr << "ERROR: Telegram request failed: " << curl_easy_strerror(res) << '\n';
 
         }
         curl_easy_cleanup(curl);
@@ -231,16 +231,21 @@ public:
 
     void printPid()
     {
-        std::cout << "PID : " << getpid() << std::endl;
+        std::cout << "INFO: PID : " << getpid() << std::endl;
     }
 
-    void scan(MonitoredDevices& device)
+    void scan(std::vector<MonitoredDevices>& device_list)
     {
         const std::string path = "/proc/";
         std::string procName;
-        device.current_device_status = DeviceStatus::IDLE;
-        device.current_pid = -1;
-        device.current_process_name.clear();
+
+        /* Set devies to IDLE state before scan */
+        for(auto & device : device_list)
+        {
+            device.current_device_status = DeviceStatus::IDLE;
+            device.current_pid = -1;
+            device.current_process_name.clear();
+        }
 
         for(const auto& entry : std::filesystem::directory_iterator(path))
         {
@@ -267,16 +272,19 @@ public:
                     }
                     else
                     {
-                        if(canonical_path == device.canonical_path)
+                        for(auto& device : device_list)
                         {
-                            device.current_device_status = DeviceStatus::ACTIVE;
-                            device.current_pid = std::stoi(subpath.substr(6,subpath.size()-1));
-                            procName = getProcessName(device.current_pid);
-                            if(!procName.empty())
+                            if(canonical_path == device.canonical_path)
                             {
-                                device.current_process_name = procName;
+                                device.current_device_status = DeviceStatus::ACTIVE;
+                                device.current_pid = std::stoi(subpath.substr(6,subpath.size()-1));
+                                procName = getProcessName(device.current_pid);
+                                if(!procName.empty())
+                                {
+                                    device.current_process_name = procName;
+                                }
+                                break; // continue to scan other fd inside the proc
                             }
-                            return; // Stop once a process with open device found
                         }
                     }
                 }
@@ -287,7 +295,6 @@ public:
             }
         }
     }
-
 
 };
 
@@ -307,18 +314,19 @@ int main()
     {
         if(checkConfigFile)
         {
+            std::cout << "INFO: Reload config file.\n";
             bool retVal = vidMon.parseConfigFile(vidMon.configFilePath, vidMon.cfg);
             if(retVal)
             {
                 checkConfigFile = false;
-                std::cout << "cooldown_seconds = " << vidMon.cfg.cooldown_seconds << std::endl;
-                std::cout << "check_interval_seconds = " << vidMon.cfg.check_interval_seconds << std::endl;
+                std::cout << "INFO: Parsing config file successful.\n";
             }
             else
             {
                 /* Fallback to default values, read config again next loop */
                 vidMon.cfg.cooldown_seconds = 60;
                 vidMon.cfg.check_interval_seconds = 1;
+                std::cout << "WARN: Parsing failed\n";
             }
         }
 
@@ -329,14 +337,22 @@ int main()
             continue;
         }
 
-        auto& device = vidMon.cfg.monitored_devices[0];
+        auto& device_list = vidMon.cfg.monitored_devices;
 
-        vidMon.scan(device);
+        vidMon.scan(device_list);
 
-        std::string alert = device.updateState(vidMon.cfg.cooldown_seconds);
-        if(!alert.empty())
+        std::string alert_concat;
+        for(auto& device : device_list)
         {
-            vidMon.trigger_async_telegram_alert(alert);
+            std::string alert = device.updateState(vidMon.cfg.cooldown_seconds);
+            if(!alert.empty())
+            {
+                alert_concat = alert_concat + alert + "\n";
+            }
+        }
+        if(!alert_concat.empty())
+        {
+            vidMon.trigger_async_telegram_alert(alert_concat);
         }
     }
     return 0;
