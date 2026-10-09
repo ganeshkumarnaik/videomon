@@ -3,7 +3,7 @@ cooldown_seconds = 60
 check_interval_seconds = 1
 
 [devices]
-monitor = ["/dev/video0"]
+monitor = ["/dev/video0", "/dev/video1", "/dev/video2"]
 
 [telegram]
 bot_token = "<YOUR_BOT_TOKEN>"
