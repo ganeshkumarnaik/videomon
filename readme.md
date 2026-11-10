@@ -2,6 +2,8 @@
 
 `videomon` is a Linux utility designed to detect when a configured camera device is accessed and notify the user through Telegram. It is intended for monitoring camera activity on a home server or unattended Linux environment where access to a video stream needs to be observed without manual checking.
 
+The name starts with 'video' because the project was originally created to notify access to video streams, which was later extended to support any configured devices.
+
 ## Current implementation details
 
 The current implementation behaves as follows:
